@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Analyse des secrets
+    # Ne s'exécute que dans le dépôt public (minutes illimitées) — jamais dans le dépôt privé.
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Lint, types, tests, build
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Le monorepo n'existe pas encore (Phase 0) : les étapes Node sont ignorées tant qu'il n'y a pas de package.json.
+      - name: Présence du projet
+        id: projet
+        run: |
+          if [ -f package.json ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.projet.outputs.present == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.projet.outputs.present == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - if: steps.projet.outputs.present == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - if: steps.projet.outputs.present == 'true'
+        run: pnpm turbo run lint typecheck test build
+
+      - name: Projet pas encore initialisé
+        if: steps.projet.outputs.present != 'true'
+        run: echo "Aucun package.json — seule la documentation est présente (Phase 0 à venir)."

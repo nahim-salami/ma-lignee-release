@@ -1,0 +1,29 @@
+# Dépendances
+node_modules/
+.pnpm-store/
+
+# Builds
+dist/
+build/
+.turbo/
+.wrangler/
+coverage/
+playwright-report/
+test-results/
+apps/mobile/android/app/build/
+
+# Secrets — ne jamais publier
+.env
+.env.*
+!.env.example
+.dev.vars
+*.keystore
+*.jks
+
+# Éditeurs / système
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log

@@ -56,6 +56,9 @@ jobs:
     timeout-minutes: 60
     env:
       API_URL: https://malignee.ahime.net
+      # Connexion avec Google (sprint F1) : identifiant OAuth « Web » du projet Google, public (variable du dépôt). Vide :
+      # l'application se compile sans le bouton Google.
+      GOOGLE_SERVER_CLIENT_ID: ${{ vars.GOOGLE_SERVER_CLIENT_ID }}
     defaults:
       run:
         working-directory: apps/flutter
@@ -175,7 +178,7 @@ jobs:
         run: |
           set -o pipefail
           base=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL"
-            --dart-define-from-file="$RUNNER_TEMP/firebase.json")
+            --dart-define=GOOGLE_SERVER_CLIENT_ID="$GOOGLE_SERVER_CLIENT_ID" --dart-define-from-file="$RUNNER_TEMP/firebase.json")
           mkdir -p "$RUNNER_TEMP/sortie" "$RUNNER_TEMP/symboles" "$RUNNER_TEMP/taille"
           # APK : bibliothèques natives compressées (publication.gradle), deux fois moins lourd à télécharger.
           export MALIGNEE_LIBS_COMPRESSEES=1

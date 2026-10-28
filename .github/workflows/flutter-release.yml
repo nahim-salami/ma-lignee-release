@@ -1,0 +1,234 @@
+name: Flutter · version Android
+
+# Version Android de l'application Flutter (plan des applications, sprint F12) : APK pour la Release GitHub, AAB pour
+# Google Play. Lancée à la demande sur une branche du dépôt de développement, récupérée pendant l'exécution avec le
+# jeton en lecture seule PRIVATE_REPO_TOKEN : le code n'est pas copié dans ce dépôt, seuls l'APK et l'AAB compilés y
+# sont publiés.
+#
+#   gh workflow run flutter-release.yml -R nahim-salami/ma-lignee-release -f ref=main                 # essai
+#   gh workflow run flutter-release.yml -R nahim-salami/ma-lignee-release -f ref=main -f publier=true  # Release
+#
+# Version : celle de apps/flutter/pubspec.yaml, qui doit être celle de lib/core/version.dart (annoncée à l'API).
+# Numéro de version Android : majeure × 10000 + mineure × 100 + correctif (1.2.3 → 10203), toujours croissant.
+#
+# Secrets (créés par scripts/creer-cle-android.ps1 du dépôt de développement, jamais affichés) :
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+# Sans eux, l'essai donne un APK signé par la clé de débogage, et la publication est refusée.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branche ou commit du dépôt de développement
+        required: true
+        default: main
+      version:
+        description: Version attendue (vide = celle de pubspec.yaml), vérifiée avant la compilation
+        required: false
+        default: ''
+      publier:
+        description: Publier la Release GitHub (sinon, APK et AAB joints à l'exécution seulement)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flutter-release-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    name: APK et AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      API_URL: https://malignee.ahime.net
+    defaults:
+      run:
+        working-directory: apps/flutter
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: nahim-salami/ma-lignee
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+
+      - name: Version
+        env:
+          ATTENDUE: ${{ inputs.version }}
+          PUBLIER: ${{ inputs.publier }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n -E 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' pubspec.yaml)
+          annoncee=$(sed -n -E "s/^const appVersion = '([^']+)';.*/\1/p" lib/core/version.dart)
+          if [ -z "$version" ]; then
+            echo "::error::pubspec.yaml : « version: majeure.mineure.correctif » introuvable."; exit 1
+          fi
+          if [ "$version" != "$annoncee" ]; then
+            echo "::error::pubspec.yaml annonce $version, lib/core/version.dart $annoncee : les mettre d'accord."; exit 1
+          fi
+          if [ -n "$ATTENDUE" ] && [ "$ATTENDUE" != "$version" ]; then
+            echo "::error::Version $ATTENDUE demandée, mais la branche est en $version."; exit 1
+          fi
+          IFS=. read -r majeure mineure correctif <<< "$version"
+          if [ "$mineure" -gt 99 ] || [ "$correctif" -gt 99 ]; then
+            echo "::error::Mineure et correctif au plus 99 (numéro Android majeure × 10000 + mineure × 100 + correctif)."; exit 1
+          fi
+          code=$(( majeure * 10000 + mineure * 100 + correctif ))
+
+          # Une version plus ancienne que le minimum de l'API serait refusée (426) dès son installation.
+          minimum=$(curl -fsS --max-time 20 "$API_URL/api/health" | sed -n -E 's/.*"minClientVersion":"([^"]+)".*/\1/p' || true)
+          if [ -n "$minimum" ]; then
+            plus_petite=$(printf '%s\n%s\n' "$minimum" "$version" | sort -V | sed -n 1p)
+            if [ "$plus_petite" != "$minimum" ]; then
+              echo "::error::Version $version plus ancienne que le minimum de l'API ($minimum)."; exit 1
+            fi
+          else
+            echo "::warning::$API_URL/api/health injoignable : version minimale non vérifiée."
+          fi
+
+          tag="android-v$version"
+          if [ "$PUBLIER" = "true" ] && gh release view "$tag" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::La Release $tag existe déjà : monter la version (pubspec.yaml et lib/core/version.dart)."; exit 1
+          fi
+          {
+            echo "VERSION=$version"
+            echo "VERSION_CODE=$code"
+            echo "TAG=$tag"
+            echo "SOURCE=$(git rev-parse --short HEAD)"
+          } >> "$GITHUB_ENV"
+          echo "Version $version ($code), minimum de l'API ${minimum:-inconnu}, Release $tag"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Projet Android
+        # Dossiers de plateforme créés ici, puis identifiant app.malignee, signature, nom et icônes (tool/android).
+        run: |
+          flutter create --platforms=android --project-name ma_lignee --org app . > /dev/null
+          rm -f test/widget_test.dart
+          bash tool/android/preparer.sh
+
+      - name: Clé de signature
+        id: cle
+        env:
+          CLE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PUBLIER: ${{ inputs.publier }}
+        run: |
+          if [ -z "$CLE" ]; then
+            echo "signee=false" >> "$GITHUB_OUTPUT"
+            if [ "$PUBLIER" = "true" ]; then
+              echo "::error::Pas de secret ANDROID_KEYSTORE_BASE64 : publication refusée (lancer scripts/creer-cle-android.ps1)."
+              exit 1
+            fi
+            echo "::notice::Pas de secret ANDROID_KEYSTORE_BASE64 : APK et AAB signés par la clé de débogage, pour essayer seulement."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/cle"
+          chmod 700 "$RUNNER_TEMP/cle"
+          printf '%s' "$CLE" | base64 --decode > "$RUNNER_TEMP/cle/ma-lignee.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/cle/ma-lignee.jks" >> "$GITHUB_ENV"
+          echo "signee=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dépendances, textes et tests
+        run: |
+          flutter pub get
+          flutter gen-l10n
+          flutter test
+
+      - name: Compilation
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          options=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL")
+          flutter build apk "${options[@]}"
+          flutter build appbundle "${options[@]}"
+          mkdir -p "$RUNNER_TEMP/sortie"
+          cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/sortie/ma-lignee-$VERSION.apk"
+          cp build/app/outputs/bundle/release/app-release.aab "$RUNNER_TEMP/sortie/ma-lignee-$VERSION.aab"
+
+      - name: Clé retirée
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/cle"
+
+      - name: Vérification
+        # Identifiant, version et certificat lus dans l'APK compilé : ce que le téléphone verra.
+        env:
+          SIGNEE: ${{ steps.cle.outputs.signee }}
+        run: |
+          outils=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          apk="$RUNNER_TEMP/sortie/ma-lignee-$VERSION.apk"
+          aab="$RUNNER_TEMP/sortie/ma-lignee-$VERSION.aab"
+          paquet=$("$outils/aapt2" dump badging "$apk" | sed -n 1p)
+          echo "$paquet"
+          echo "$paquet" | grep -q "name='app.malignee'" || { echo "::error::Identifiant différent de app.malignee."; exit 1; }
+          echo "$paquet" | grep -q "versionCode='$VERSION_CODE'" || { echo "::error::Numéro de version différent de $VERSION_CODE."; exit 1; }
+          echo "$paquet" | grep -q "versionName='$VERSION'" || { echo "::error::Version différente de $VERSION."; exit 1; }
+          permissions=$("$outils/aapt2" dump permissions "$apk")
+          echo "$permissions" | grep -q 'android.permission.INTERNET' || { echo "::error::Permission Internet absente."; exit 1; }
+          "$outils/apksigner" verify "$apk"
+          certificat=$("$outils/apksigner" verify --print-certs "$apk" | sed -n -E '0,/certificate SHA-256 digest: /s/.*certificate SHA-256 digest: //p')
+          certificat_aab=$(keytool -printcert -jarfile "$aab" | sed -n -E '0,/SHA256: /s/.*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          if [ "$certificat" != "$certificat_aab" ]; then
+            echo "::error::L'APK et l'AAB ne sont pas signés par la même clé."; exit 1
+          fi
+          (cd "$RUNNER_TEMP/sortie" && sha256sum ./* | sed 's# \./# #' > SHA256SUMS.txt)
+          empreinte=$(echo "$certificat" | sed -E 's/(..)/\1:/g; s/:$//' | tr 'a-f' 'A-F')
+          echo "CERTIFICAT=$empreinte" >> "$GITHUB_ENV"
+          {
+            echo "### Ma Lignée $VERSION ($VERSION_CODE) pour Android"
+            echo
+            if [ "$SIGNEE" = "true" ]; then
+              echo "Signé par la clé de version (secrets du dépôt)."
+            else
+              echo "**Clé de débogage** (pas de secret ANDROID_KEYSTORE_BASE64) : pour essayer seulement, ne pas distribuer."
+            fi
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Identifiant | \`app.malignee\` |"
+            echo "| Source | \`ma-lignee@$SOURCE\` |"
+            echo "| API | $API_URL |"
+            echo "| Flutter | $(flutter --version | sed -n 1p) |"
+            echo "| APK | $(du -h "$apk" | cut -f1) |"
+            echo "| AAB | $(du -h "$aab" | cut -f1) |"
+            echo
+            echo "Empreinte SHA-256 du certificat (Android App Links, \`assetlinks.json\`) :"
+            echo
+            echo "\`$empreinte\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ma-lignee-android-${{ env.VERSION }}${{ steps.cle.outputs.signee != 'true' && '-debogage' || '' }}
+          path: ${{ runner.temp }}/sortie/*
+          retention-days: 14
+
+      - name: Release GitHub
+        if: inputs.publier && steps.cle.outputs.signee == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Ma Lignée $VERSION pour Android.
+
+          - **APK** (\`ma-lignee-$VERSION.apk\`) : à installer directement sur le téléphone. Une version déjà installée
+            est mise à jour, la session est gardée.
+          - **AAB** (\`ma-lignee-$VERSION.aab\`) : le paquet envoyé à Google Play, pas à installer.
+
+          Empreinte SHA-256 du certificat : \`$CERTIFICAT\`
+          Sommes de contrôle : \`SHA256SUMS.txt\`.
+          EOF
+          gh release create "$TAG" "$RUNNER_TEMP"/sortie/* \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Ma Lignée $VERSION (Android)" --notes-file "$RUNNER_TEMP/notes.md" --latest

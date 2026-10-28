@@ -14,6 +14,10 @@ name: Flutter · version Android
 # Secrets (créés par scripts/creer-cle-android.ps1 du dépôt de développement, jamais affichés) :
 #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
 # Sans eux, l'essai donne un APK signé par la clé de débogage, et la publication est refusée.
+#
+# Notifications du téléphone (sprint F5) : secret GOOGLE_SERVICES_JSON, le google-services.json du projet Firebase
+# (application app.malignee). tool/firebase-defines.sh en tire les options de compilation ; sans lui, la version se
+# compile sans notifications (docs/notifications-applications.md du dépôt de développement).
 on:
   workflow_dispatch:
     inputs:
@@ -144,13 +148,25 @@ jobs:
           flutter gen-l10n
           flutter test
 
+      - name: Notifications du téléphone
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -f tool/firebase-defines.sh ]; then
+            bash tool/firebase-defines.sh "$RUNNER_TEMP/firebase.json" app.malignee
+          else
+            echo '{}' > "$RUNNER_TEMP/firebase.json"
+            echo "::notice::Branche sans tool/firebase-defines.sh (avant le sprint F5) : version sans notifications."
+          fi
+
       - name: Compilation
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          options=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL")
+          options=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL"
+            --dart-define-from-file="$RUNNER_TEMP/firebase.json")
           # APK : bibliothèques natives compressées (publication.gradle), deux fois moins lourd à télécharger.
           MALIGNEE_LIBS_COMPRESSEES=1 flutter build apk "${options[@]}"
           flutter build appbundle "${options[@]}"

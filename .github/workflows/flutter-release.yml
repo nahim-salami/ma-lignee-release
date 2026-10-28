@@ -151,7 +151,8 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           options=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL")
-          flutter build apk "${options[@]}"
+          # APK : bibliothèques natives compressées (publication.gradle), deux fois moins lourd à télécharger.
+          MALIGNEE_LIBS_COMPRESSEES=1 flutter build apk "${options[@]}"
           flutter build appbundle "${options[@]}"
           mkdir -p "$RUNNER_TEMP/sortie"
           cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/sortie/ma-lignee-$VERSION.apk"

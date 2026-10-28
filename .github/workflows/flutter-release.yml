@@ -182,7 +182,7 @@ jobs:
 
           # Mesure (arm64, non brouillée : `--analyze-size` refuse `--obfuscate`) : paquets Dart, bibliothèques natives,
           # ressources. Le détail complet est joint à l'exécution (taille/).
-          flutter build apk "${base[@]}" --target-platform android-arm64 --analyze-size \
+          MALIGNEE_ABI=arm64-v8a flutter build apk "${base[@]}" --target-platform android-arm64 --analyze-size \
             --code-size-directory="$RUNNER_TEMP/taille" | tee "$RUNNER_TEMP/taille/analyse.txt"
           {
             echo "### Ce qui pèse dans l'APK arm64 (avant brouillage)"
@@ -193,10 +193,11 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Un APK par architecture, puis l'universel (arm et arm64), chacun avec ses symboles Dart.
-          for cible in arm64-v8a:android-arm64 armeabi-v7a:android-arm universel:android-arm,android-arm64; do
-            nom=${cible%%:*}
-            flutter build apk "${base[@]}" --target-platform "${cible#*:}" \
+          # Un APK par architecture, puis l'universel (arm et arm64), chacun avec ses symboles Dart. MALIGNEE_ABI
+          # (publication.gradle) retire les bibliothèques des extensions pour les autres architectures.
+          for cible in arm64-v8a:android-arm64:arm64-v8a armeabi-v7a:android-arm:armeabi-v7a             universel:android-arm,android-arm64:armeabi-v7a,arm64-v8a; do
+            IFS=: read -r nom plateformes abis <<< "$cible"
+            MALIGNEE_ABI="$abis" flutter build apk "${base[@]}" --target-platform "$plateformes" \
               --obfuscate --split-debug-info="$RUNNER_TEMP/symboles/apk-$nom"
             suffixe=$([ "$nom" = universel ] && echo '' || echo "-$nom")
             cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/sortie/ma-lignee-$VERSION$suffixe.apk"
@@ -239,10 +240,15 @@ jobs:
             fi
             octets=$(stat -c %s "$fichier")
             architectures=$(unzip -Z1 "$fichier" 'lib/*' 2>/dev/null | cut -d/ -f2 | sort -u | paste -sd ' ' -)
+            # Un dossier d'architecture sans libflutter.so ferait planter l'application sur ces téléphones.
+            for abi in $architectures; do
+              unzip -Z1 "$fichier" "lib/$abi/libflutter.so" > /dev/null 2>&1                 || { echo "::error::$nom : lib/$abi/ sans libflutter.so, l'application planterait sur ces téléphones."; exit 1; }
+            done
             if [ "$octets" -gt "$BUDGET" ]; then
               echo "::error::$nom pèse $octets octets, au-delà du budget de $BUDGET (plan, sprint F11)."; exit 1
             fi
             lignes+=("| \`$nom\` | $(awk -v o="$octets" 'BEGIN { printf "%.1f Mo", o / 1000000 }') | ${architectures:-aucune} |")
+            echo "$nom : $octets octets, architectures ${architectures:-aucune}"
             # Ce qui pèse : chaque bibliothèque native, taille compressée dans l'APK.
             unzip -v "$fichier" 'lib/*' | awk 'NF >= 8 && $NF ~ /^lib\// { printf "  %-45s %8.1f Mo\n", $NF, $3 / 1000000 }'
           done

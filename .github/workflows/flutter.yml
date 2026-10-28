@@ -1,0 +1,60 @@
+name: Flutter
+
+# Application Flutter (plan des applications, sprint F1) : analyse, tests et compilation, lancés à la demande sur une
+# branche du dépôt de développement. Le code est récupéré pendant l'exécution avec un jeton en lecture seule
+# (secret PRIVATE_REPO_TOKEN) : il n'est pas copié dans ce dépôt, et aucun fichier compilé n'est publié.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branche ou commit à vérifier
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter:
+    name: Analyse, tests et compilation
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: apps/flutter
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: nahim-salami/ma-lignee
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Dossiers de plateforme
+        # Créés ici (lib/ et test/ ne sont pas touchés) ; le test d'exemple de `flutter create` est retiré.
+        run: |
+          flutter create --platforms=android,web --project-name ma_lignee --org org.malignee . > /dev/null
+          rm -f test/widget_test.dart
+      - name: Dépendances et textes
+        run: |
+          flutter pub get
+          flutter gen-l10n
+      - name: Analyse
+        run: flutter analyze --no-fatal-infos
+      - name: Tests
+        run: flutter test --reporter expanded
+      - name: Compilation web
+        run: flutter build web --release
+      - name: Compilation Android (APK de débogage)
+        run: flutter build apk --debug

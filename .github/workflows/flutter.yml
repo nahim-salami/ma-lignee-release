@@ -53,7 +53,19 @@ jobs:
       - name: Analyse
         run: flutter analyze --no-fatal-infos
       - name: Tests
+        # Les tests des finitions (sprint F11) écrivent aussi les captures des écrans principaux dans les 5 langues,
+        # en clair et en sombre, dans le dossier CAPTURES.
+        env:
+          CAPTURES: ${{ runner.temp }}/captures
         run: flutter test --reporter expanded
+      - name: Captures des écrans
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captures-${{ github.run_id }}
+          path: ${{ runner.temp }}/captures
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Compilation web
         run: flutter build web --release
       - name: Compilation Android (APK de débogage)

@@ -18,6 +18,14 @@ name: Flutter · version Android
 # Notifications du téléphone (sprint F5) : secret GOOGLE_SERVICES_JSON, le google-services.json du projet Firebase
 # (application app.malignee). tool/firebase-defines.sh en tire les options de compilation ; sans lui, la version se
 # compile sans notifications (docs/notifications-applications.md du dépôt de développement).
+#
+# Taille (sprint F11, budget de 25 Mo par APK, vérifié) : code Dart brouillé, ses symboles mis à part
+# (`--obfuscate --split-debug-info`, joints à l'exécution pour relire une trace d'erreur), un APK par architecture
+# (arm64-v8a : presque tous les téléphones depuis 2017 ; armeabi-v7a : les anciens et les petits prix) et un APK
+# universel limité à ces deux architectures. Chacun est compilé à part plutôt qu'avec `--split-per-abi`, qui
+# change le numéro de version selon l'architecture (arm64 = 2000 + numéro) : un APK universel ne pourrait plus mettre
+# à jour un APK arm64 déjà installé. L'AAB garde aussi x86_64 : Google Play ne livre que la bonne au téléphone.
+# Une compilation arm64 non brouillée mesure d'abord ce qui pèse (`--analyze-size`), dans le résumé.
 on:
   workflow_dispatch:
     inputs:
@@ -45,7 +53,7 @@ jobs:
   android:
     name: APK et AAB
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       API_URL: https://malignee.ahime.net
     defaults:
@@ -165,13 +173,38 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          options=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL"
+          set -o pipefail
+          base=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL"
             --dart-define-from-file="$RUNNER_TEMP/firebase.json")
+          mkdir -p "$RUNNER_TEMP/sortie" "$RUNNER_TEMP/symboles" "$RUNNER_TEMP/taille"
           # APK : bibliothèques natives compressées (publication.gradle), deux fois moins lourd à télécharger.
-          MALIGNEE_LIBS_COMPRESSEES=1 flutter build apk "${options[@]}"
-          flutter build appbundle "${options[@]}"
-          mkdir -p "$RUNNER_TEMP/sortie"
-          cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/sortie/ma-lignee-$VERSION.apk"
+          export MALIGNEE_LIBS_COMPRESSEES=1
+
+          # Mesure (arm64, non brouillée : `--analyze-size` refuse `--obfuscate`) : paquets Dart, bibliothèques natives,
+          # ressources. Le détail complet est joint à l'exécution (taille/).
+          flutter build apk "${base[@]}" --target-platform android-arm64 --analyze-size \
+            --code-size-directory="$RUNNER_TEMP/taille" | tee "$RUNNER_TEMP/taille/analyse.txt"
+          {
+            echo "### Ce qui pèse dans l'APK arm64 (avant brouillage)"
+            echo
+            echo '```'
+            sed -n '/total compressed/,$p' "$RUNNER_TEMP/taille/analyse.txt" | head -80
+            echo '```'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Un APK par architecture, puis l'universel (arm et arm64), chacun avec ses symboles Dart.
+          for cible in arm64-v8a:android-arm64 armeabi-v7a:android-arm universel:android-arm,android-arm64; do
+            nom=${cible%%:*}
+            flutter build apk "${base[@]}" --target-platform "${cible#*:}" \
+              --obfuscate --split-debug-info="$RUNNER_TEMP/symboles/apk-$nom"
+            suffixe=$([ "$nom" = universel ] && echo '' || echo "-$nom")
+            cp build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/sortie/ma-lignee-$VERSION$suffixe.apk"
+          done
+
+          # AAB pour Google Play : bibliothèques non compressées (Play compresse lui-même), toutes les architectures.
+          unset MALIGNEE_LIBS_COMPRESSEES
+          flutter build appbundle "${base[@]}" --obfuscate --split-debug-info="$RUNNER_TEMP/symboles/aab"
           cp build/app/outputs/bundle/release/app-release.aab "$RUNNER_TEMP/sortie/ma-lignee-$VERSION.aab"
 
       - name: Clé retirée
@@ -179,28 +212,42 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/cle"
 
       - name: Vérification
-        # Identifiant, version et certificat lus dans l'APK compilé : ce que le téléphone verra.
+        # Identifiant, version, certificat et taille lus dans chaque APK compilé : ce que le téléphone verra.
         env:
           SIGNEE: ${{ steps.cle.outputs.signee }}
+          # Budget du plan (sprint F11) : chaque APK sous 25 Mo, en octets.
+          BUDGET: '25000000'
         run: |
           outils=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           apk="$RUNNER_TEMP/sortie/ma-lignee-$VERSION.apk"
           aab="$RUNNER_TEMP/sortie/ma-lignee-$VERSION.aab"
-          paquet=$("$outils/aapt2" dump badging "$apk" | sed -n 1p)
-          echo "$paquet"
-          echo "$paquet" | grep -q "name='app.malignee'" || { echo "::error::Identifiant différent de app.malignee."; exit 1; }
-          echo "$paquet" | grep -q "versionCode='$VERSION_CODE'" || { echo "::error::Numéro de version différent de $VERSION_CODE."; exit 1; }
-          echo "$paquet" | grep -q "versionName='$VERSION'" || { echo "::error::Version différente de $VERSION."; exit 1; }
-          permissions=$("$outils/aapt2" dump permissions "$apk")
-          echo "$permissions" | grep -q 'android.permission.INTERNET' || { echo "::error::Permission Internet absente."; exit 1; }
-          "$outils/apksigner" verify "$apk"
-          certificat=$("$outils/apksigner" verify --print-certs "$apk" | sed -n -E '0,/certificate SHA-256 digest: /s/.*certificate SHA-256 digest: //p')
           certificat_aab=$(keytool -printcert -jarfile "$aab" | sed -n -E '0,/SHA256: /s/.*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
-          if [ "$certificat" != "$certificat_aab" ]; then
-            echo "::error::L'APK et l'AAB ne sont pas signés par la même clé."; exit 1
-          fi
+          lignes=()
+          for fichier in "$RUNNER_TEMP"/sortie/*.apk; do
+            nom=$(basename "$fichier")
+            paquet=$("$outils/aapt2" dump badging "$fichier" | sed -n 1p)
+            echo "$nom : $paquet"
+            echo "$paquet" | grep -q "name='app.malignee'" || { echo "::error::$nom : identifiant différent de app.malignee."; exit 1; }
+            echo "$paquet" | grep -q "versionCode='$VERSION_CODE'" || { echo "::error::$nom : numéro de version différent de $VERSION_CODE."; exit 1; }
+            echo "$paquet" | grep -q "versionName='$VERSION'" || { echo "::error::$nom : version différente de $VERSION."; exit 1; }
+            "$outils/aapt2" dump permissions "$fichier" | grep -q 'android.permission.INTERNET' \
+              || { echo "::error::$nom : permission Internet absente."; exit 1; }
+            "$outils/apksigner" verify "$fichier"
+            certificat=$("$outils/apksigner" verify --print-certs "$fichier" | sed -n -E '0,/certificate SHA-256 digest: /s/.*certificate SHA-256 digest: //p')
+            if [ "$certificat" != "$certificat_aab" ]; then
+              echo "::error::$nom et l'AAB ne sont pas signés par la même clé."; exit 1
+            fi
+            octets=$(stat -c %s "$fichier")
+            architectures=$(unzip -Z1 "$fichier" 'lib/*' 2>/dev/null | cut -d/ -f2 | sort -u | paste -sd ' ' -)
+            if [ "$octets" -gt "$BUDGET" ]; then
+              echo "::error::$nom pèse $octets octets, au-delà du budget de $BUDGET (plan, sprint F11)."; exit 1
+            fi
+            lignes+=("| \`$nom\` | $(awk -v o="$octets" 'BEGIN { printf "%.1f Mo", o / 1000000 }') | ${architectures:-aucune} |")
+            # Ce qui pèse : chaque bibliothèque native, taille compressée dans l'APK.
+            unzip -v "$fichier" 'lib/*' | awk 'NF >= 8 && $NF ~ /^lib\// { printf "  %-45s %8.1f Mo\n", $NF, $3 / 1000000 }'
+          done
           (cd "$RUNNER_TEMP/sortie" && sha256sum ./* | sed 's# \./# #' > SHA256SUMS.txt)
-          empreinte=$(echo "$certificat" | sed -E 's/(..)/\1:/g; s/:$//' | tr 'a-f' 'A-F')
+          empreinte=$(echo "$certificat_aab" | sed -E 's/(..)/\1:/g; s/:$//' | tr 'a-f' 'A-F')
           echo "CERTIFICAT=$empreinte" >> "$GITHUB_ENV"
           {
             echo "### Ma Lignée $VERSION ($VERSION_CODE) pour Android"
@@ -217,8 +264,11 @@ jobs:
             echo "| Source | \`ma-lignee@$SOURCE\` |"
             echo "| API | $API_URL |"
             echo "| Flutter | $(flutter --version | sed -n 1p) |"
-            echo "| APK | $(du -h "$apk" | cut -f1) |"
-            echo "| AAB | $(du -h "$aab" | cut -f1) |"
+            echo "| AAB | $(awk -v o="$(stat -c %s "$aab")" 'BEGIN { printf "%.1f Mo", o / 1000000 }') |"
+            echo
+            echo "| APK | Taille (budget 25 Mo) | Architectures |"
+            echo "|---|---|---|"
+            printf '%s\n' "${lignes[@]}"
             echo
             echo "Empreinte SHA-256 du certificat (Android App Links, \`assetlinks.json\`) :"
             echo
@@ -231,21 +281,33 @@ jobs:
           path: ${{ runner.temp }}/sortie/*
           retention-days: 14
 
+      # Symboles du code Dart brouillé (`flutter symbolize`) et mesure détaillée de la taille : jamais dans la Release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ma-lignee-android-${{ env.VERSION }}-symboles-et-taille
+          path: |
+            ${{ runner.temp }}/symboles
+            ${{ runner.temp }}/taille
+          retention-days: 90
+
       - name: Release GitHub
         if: inputs.publier && steps.cle.outputs.signee == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
           Ma Lignée $VERSION pour Android.
 
-          - **APK** (\`ma-lignee-$VERSION.apk\`) : à installer directement sur le téléphone. Une version déjà installée
-            est mise à jour, la session est gardée.
+          - **APK** à installer directement sur le téléphone. Une version déjà installée est mise à jour, la session
+            est gardée, quel que soit l'APK choisi (même numéro de version, même clé) :
+            - \`ma-lignee-$VERSION-arm64-v8a.apk\` : le plus léger, pour presque tous les téléphones depuis 2017 ;
+            - \`ma-lignee-$VERSION-armeabi-v7a.apk\` : les téléphones plus anciens ou d'entrée de gamme ;
+            - \`ma-lignee-$VERSION.apk\` : les deux à la fois, si l'on ne sait pas lequel choisir.
           - **AAB** (\`ma-lignee-$VERSION.aab\`) : le paquet envoyé à Google Play, pas à installer.
 
           Empreinte SHA-256 du certificat : \`$CERTIFICAT\`
           Sommes de contrôle : \`SHA256SUMS.txt\`.
-          EOF
+          NOTES
           gh release create "$TAG" "$RUNNER_TEMP"/sortie/* \
             -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Ma Lignée $VERSION (Android)" --notes-file "$RUNNER_TEMP/notes.md" --latest

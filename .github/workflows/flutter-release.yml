@@ -19,6 +19,11 @@ name: Flutter · version Android
 # (application app.malignee). tool/firebase-defines.sh en tire les options de compilation ; sans lui, la version se
 # compile sans notifications (docs/notifications-applications.md du dépôt de développement).
 #
+# Connexion avec Facebook : variables (publiques) FACEBOOK_APP_ID et FACEBOOK_CLIENT_TOKEN, l'identifiant de
+# l'application Facebook et son jeton client, qui sont dans l'APK de toute façon. tool/android/preparer.sh les écrit dans
+# le manifeste ; sans elles, la version se compile sans Facebook (docs/facebook.md du dépôt de développement). La clé
+# secrète de l'application Facebook ne vient jamais ici.
+#
 # Taille (sprint F11, budget de 25 Mo par APK, vérifié) : code Dart brouillé, ses symboles mis à part
 # (`--obfuscate --split-debug-info`, joints à l'exécution pour relire une trace d'erreur), un APK par architecture
 # (arm64-v8a : presque tous les téléphones depuis 2017 ; armeabi-v7a : les anciens et les petits prix) et un APK
@@ -59,6 +64,9 @@ jobs:
       # Connexion avec Google (sprint F1) : identifiant OAuth « Web » du projet Google, public (variable du dépôt). Vide :
       # l'application se compile sans le bouton Google.
       GOOGLE_SERVER_CLIENT_ID: ${{ vars.GOOGLE_SERVER_CLIENT_ID }}
+      # Connexion avec Facebook : lus par tool/android/preparer.sh et donnés à la compilation. Vides : sans Facebook.
+      FACEBOOK_APP_ID: ${{ vars.FACEBOOK_APP_ID }}
+      FACEBOOK_CLIENT_TOKEN: ${{ vars.FACEBOOK_CLIENT_TOKEN }}
     defaults:
       run:
         working-directory: apps/flutter
@@ -178,7 +186,8 @@ jobs:
         run: |
           set -o pipefail
           base=(--release --build-name="$VERSION" --build-number="$VERSION_CODE" --dart-define=API_URL="$API_URL"
-            --dart-define=GOOGLE_SERVER_CLIENT_ID="$GOOGLE_SERVER_CLIENT_ID" --dart-define-from-file="$RUNNER_TEMP/firebase.json")
+            --dart-define=GOOGLE_SERVER_CLIENT_ID="$GOOGLE_SERVER_CLIENT_ID" --dart-define=FACEBOOK_APP_ID="$FACEBOOK_APP_ID"
+            --dart-define-from-file="$RUNNER_TEMP/firebase.json")
           mkdir -p "$RUNNER_TEMP/sortie" "$RUNNER_TEMP/symboles" "$RUNNER_TEMP/taille"
           # APK : bibliothèques natives compressées (publication.gradle), deux fois moins lourd à télécharger.
           export MALIGNEE_LIBS_COMPRESSEES=1
